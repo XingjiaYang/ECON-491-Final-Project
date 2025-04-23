@@ -1,0 +1,642 @@
+---
+title: "ECON FINAL PROJECT"
+author: "Xingjia Yang, Husheng Yu, Naman"
+date: "2025-04-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require(doParallel)
+cl = makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+```
+
+# Data Preprocessing
+
+## Read Data
+
+```{r}
+require(tidyverse)
+
+raw = read_csv("mortgage.csv")
+```
+
+## Clean Data
+
+```{r}
+sum(is.na(raw))
+```
+
+From the output, I can see that the dataset does NOT missing values.
+
+From the data, some columns' value has quotes, but some do not. Then I observe the data, and I find that the columns with quote is categorical values. Therefore, I will transfer the quote value to factors and eliminate the quotes.
+
+```{r}
+df_cleaned = raw %>%
+    mutate(across(
+        .cols = everything(),
+        .fns = ~ {
+            
+            all_quoted = all(grepl("^'.*'$", .x[!is.na(.x)]))
+            
+            if (all_quoted) {
+                
+                as.factor(str_remove_all(.x, "^'|'$"))
+                
+            } else {
+                    
+                suppressWarnings(as.numeric(.x))
+            }
+        }
+    )
+)
+```
+
+<\p>
+Another thing, I have find `MORTLINE` only has 3 values. It means it may be a categorical predictors. Therefore, I will transfer it to factor. (IS THAT REASONABLE TO DO THAT?)
+<\p>
+
+```{r}
+df_cleaned$MORTLINE = as.factor(df_cleaned$MORTLINE)
+```
+
+
+Then I delete some meaningless columns (or predictors), where the columns only have 1 values. It is meaningless for machine learning, whatever it is supervised or unsupervised.
+
+```{r}
+for (i in 1:37) {
+    
+    if (length(unique(df_cleaned[[i]])) == 1) {
+        df_cleaned[, i] = NA
+    }
+}
+
+df_cleaned = df_cleaned %>%
+    select(where(~ !all(is.na(.x))))
+```
+
+I will delete the columns `CONTROL`, since it has 15798 unique values, as a factor, I think `CONTROL` plays a role of ID, which will influence the model.
+
+```{r}
+df_cleaned = df_cleaned %>%
+    select(-CONTROL)
+```
+
+## Split data to training set and test set
+
+```{r}
+set.seed(123)
+
+set_full = df_cleaned %>%
+    mutate(id = 1:16834)
+
+set_training = set_full %>%
+    slice_sample(prop = 0.8)
+
+set_test = set_full %>%
+    anti_join(set_training) %>%
+    select(-id)
+
+set_training = set_training %>%
+    select(-id)
+```
+
+# Explore Data
+
+Since our sake is to predict the interest rate of mortgage, therefore we will not do unsupervised learning, like K-Means.
+
+
+
+## Explore the relationship between 
+
+```{r}
+require(patchwork)
+
+plots = list()
+
+for (i in 1:29) {
+    var_name <- names(set_training)[i]
+    x_var <- set_training[[i]]
+  
+    if (is.factor(x_var)) {
+        
+        p = ggplot(set_training, aes(x = factor(.data[[var_name]]), y = INTRATE)) +
+        geom_boxplot() +
+        theme_minimal() +
+        labs(x = var_name, y = "Interest Rate")
+        
+    } else {
+        
+        p = ggplot(set_training, aes(x = .data[[var_name]], y = INTRATE)) +
+        geom_point(alpha = 0.6) +
+        theme_minimal() +
+        labs(x = var_name, y = "Interest Rate")
+        
+    }
+  
+    plots[[i]] = p
+}
+
+print(plots)
+```
+
+From the plot, I can see that some predictors have significant association with response variable `INTRATE`, and some do not.
+
+ * `JAMMORT` does not have significant association with `INTRATE`.
+ * `JHELOCBAL` has significant association with `INTRATE`.
+ * `JHELOCLIM` has significant association with `INTRATE`.
+ * `JINTRATE` does not have significant association with `INTRATE`.
+ * `JMISCPMT` has significant association with `INTRATE`.
+ * `JMORTCLASS` does not have significant association with `INTRATE`.
+ * `JMORTLINE` does not have significant association with `INTRATE`.
+ * `JMORTTYPE` does not have significant association with `INTRATE`.
+ * `JPMTAMT` does not have significant association with `INTRATE`.
+ * `JPMTONLY` has significant association with `INTRATE`.
+ * `JREFICSH` does not have significant association with `INTRATE`. But, the class `0` has more outliers.
+ * `JTAXPMT` has significant association with `INTRATE`.
+ * `AMMORT` has potential negative relationship between `INTRATE`.
+ * `REFI` has significant association with `INTRATE`.
+ * `MORTCLASS` has significant association with `INTRATE`.
+ * `MORTTYPE` has significant association with `INTRATE`.
+ * `TAXPMT` has significant association with `INTRATE`.
+ * `PMTONLY` has potential negative relationship between `INTRATE`.
+ * `MORTLINE` has significant association with `INTRATE`. 
+ * `REFICSHAMT` has potential negative relationship between `INTRATE`.
+ * `MORTADDTN` has potential negative relationship between `INTRATE`.
+ * `HELOCLIM` has potential negative relationship between `INTRATE`.
+ * `REFICSH` has significant association with `INTRATE`.
+ * `HELOCBAL` has significant association with `INTRATE`.
+ * `HELOCADD` has significant association with `INTRATE`.
+ * `PMTFREQ` has significant association with `INTRATE`.
+ * `LOANTYPE` has significant association with `INTRATE`.
+ * `MISCPMT` does not have significant association with `INTRATE`.
+ * `PMTAMT` has potential negative relationship between `INTRATE`
+
+Then we will regress the model.
+
+# Regress Model (LACK STEPWISE AND LEAPS AND BOUND select modelings.)
+
+## Linear Model
+
+Firstly I will do a MLR, multi-linear regress. Then I will use lasso, ridge and elastic net to shrink it.
+
+```{r}
+model_mlr_full = lm(INTRATE ~ ., data = set_training)
+
+summary(model_mlr_full)
+```
+
+Some `NA` values appeared. It means the data, the design matrix have some multi-linear relationship between predictors. Then use Shrinkage Method is suitable.
+
+### LASSO for MLR
+
+```{r}
+require(glmnet)
+
+set.seed(123)
+
+X = model.matrix(INTRATE ~ ., data = set_training)[, -1]
+Y = set_training$INTRATE
+
+model_mlr_lasso = glmnet(X, Y, alpha = 1)
+
+plot(model_mlr_lasso, xvar = "lambda", label = TRUE)
+```
+
+Use Cross-Validation to find the best $\lambda$.
+
+```{r}
+set.seed(123)
+
+cv_model_mlr_lasso = cv.glmnet(X, Y, alpha = 1,
+                               nfolds = 10,
+                               type.measure = "mse",
+                               thresh = 1e-10,
+                               maxit = 1e6,
+                               lambda.min.ratio = 1e-5,
+                               nlambda = 1000)
+```
+
+### RIDGE for MLR
+
+```{r}
+set.seed(123)
+
+model_mlr_ridge = glmnet(X, Y, alpha = 0)
+
+plot(model_mlr_ridge, xvar = "lambda", label = TRUE)
+```
+
+Use Cross-Validation to find the best $\lambda$.
+
+```{r}
+set.seed(123)
+
+cv_model_mlr_ridge = cv.glmnet(X, Y, alpha = 0,
+                               nfolds = 10,
+                               type.measure = "mse",
+                               thresh = 1e-10,
+                               maxit = 1e6,
+                               lambda.min.ratio = 1e-5,
+                               nlambda = 1000)
+```
+
+
+### Elastic Net for MLR
+
+```{r}
+require(tidymodels)
+
+set.seed(123)
+
+model_elastic_net = linear_reg(penalty = tune(), mixture = tune()) %>%
+    set_engine("glmnet")
+
+recipe_elastic_net = recipe(INTRATE ~ ., data = set_training) %>%
+    step_dummy(all_nominal_predictors())
+
+cv_model_mlr_elastic_net = vfold_cv(set_training, v = 10)
+
+workflow_elastic_net = workflow() %>%
+    add_model(model_elastic_net) %>%
+    add_recipe(recipe_elastic_net)
+
+tune_elastic_net = grid_regular(
+    penalty(range = c(-4, 1)),
+    mixture(range = c(0, 1)),
+    levels = c(penalty = 100, mixture = 100)
+)
+
+tuned_elastic_net = tune_grid(
+    workflow_elastic_net,
+    resamples = cv_model_mlr_elastic_net,
+    grid = tune_elastic_net,
+    metrics = metric_set(yardstick::rmse)
+)
+
+best_params_elastic_net = select_best(tuned_elastic_net, metric = "rmse")
+best_params_elastic_net
+```
+
+## Evaluate Models
+
+Since our goal is to get best result of predicting interest rate, `INTRATE`. Therefore, I will evaluate the models' performance of these 4 models, MLR, Lasso and Ridge. I will use RMSE to evaluate the models' performance.
+
+### Evaluate Linear Regression
+
+```{r}
+rmse = function(actual, pred) {
+    sqrt(mean((actual - pred) ** 2))
+}
+
+pred_mlr = predict(model_mlr_full, newdata = set_test)
+
+rmse(actual = set_test %>% pull(INTRATE), pred = pred_mlr)
+```
+
+### Evaluate Lasso Model
+
+```{r}
+X_test = model.matrix(INTRATE ~ ., data = set_test)[, -1]
+
+pred_lasso = predict(cv_model_mlr_lasso, newx = X_test, s = cv_model_mlr_lasso$lambda.min)
+
+rmse(actual = set_test %>% pull(INTRATE), pred = pred_lasso)
+```
+
+### Evaluate Ridge Model
+
+```{r}
+pred_ridge = predict(cv_model_mlr_ridge, newx = X_test, s = cv_model_mlr_ridge$lambda.min)
+
+rmse(actual = set_test %>% pull(INTRATE), pred = pred_ridge)
+```
+
+### Evaluate Elastic Net
+
+```{r}
+workflow_final_elastic_net = finalize_workflow(
+    workflow_elastic_net,
+    best_params_elastic_net
+)
+
+final_fit = fit(workflow_final_elastic_net, data = set_training)
+
+pred_elastic_net = predict(final_fit, new_data = set_test)$.pred
+
+rmse(actual = set_test %>% pull(INTRATE), pred = pred_elastic_net)
+```
+
+## Summary of Linear Model
+
+From the output, we can see that the elastic net have lowest RMSE, which means we will choose the Elastic Net as final model for linear regression.
+
+# Tree Model
+
+## A full Tree Model
+
+```{r}
+require(tree)
+
+model_tree = tree(INTRATE ~ ., data = set_training, mindev = 1e-4)
+```
+
+Visualize it.
+
+```{r}
+plot(model_tree)
+text(model_tree, cex = 0.5)
+```
+
+The tree model has to many leaves. That's because I set the `mindev = 1e-4`, which is too small. But I will keep it since I will prune the tree. I will prune by Cross-Validation, and I will use the pruned tree as model to predict data, not the full tree.
+
+## Pruned Tree
+
+```{r}
+set.seed(123)
+
+cv_model_tree = cv.tree(model_tree)
+
+size_best_pruned_tree = cv_model_tree$size[cv_model_tree$dev == min(cv_model_tree$dev)]
+
+length(size_best_pruned_tree)
+```
+
+Since there are many best size, then I can just pick one of them as the final pruned model. Also, the reason why there are so many best sizes is because the accuracy problem.
+
+```{r}
+size_best_pruned_tree = cv_model_tree$size[which.min(cv_model_tree$dev)]
+
+model_tree_pruned = prune.tree(model_tree, best = size_best_pruned_tree)
+```
+
+## Random Forest & Bagging
+
+Since when `m=p`, the random forest become the bagging method. Therefore we will talk them together, since I will try `m` for all possible values.
+
+```{r, tuned_rf, cache=TRUE}
+require(randomForest)
+
+if (file.exists("tuned_rf.rds")) {
+    
+    tuned_rf = readRDS("tuned_rf.rds")
+    model_rf = readRDS("model_rf.rds")
+    recipe_rf = readRDS("recipe_rf.rds")
+    cv_model_rf = readRDS("cv_model_rf.rds")
+    workflow_rf = readRDS("workflow_rf.rds")
+    grid_rf = readRDS("grid_rf.rds")
+    
+} else {
+
+    set.seed(123)
+
+    model_rf = rand_forest(mtry = tune(),trees = tune(), min_n = tune()) %>%
+        set_engine("randomForest") %>%
+        set_mode("regression")
+
+    recipe_rf = recipe(INTRATE ~ ., data = set_training)
+
+    workflow_rf = workflow() %>%
+        add_model(model_rf) %>%
+        add_recipe(recipe_rf)
+
+    cv_model_rf = vfold_cv(set_training, v = 10)
+
+    grid_rf = crossing(
+        mtry = 1:29,
+        min_n = 5,
+        trees = seq(100, 1000, by = 100)
+    )
+
+    tuned_rf = tune_grid(
+        workflow_rf,
+        resamples = cv_model_rf,
+        grid = grid_rf,
+        metrics = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(tuned_rf, "tuned_rf.rds")
+    saveRDS(grid_rf, "grid_rf.rds")
+    saveRDS(model_rf, "model_rf.rds")
+    saveRDS(cv_model_rf, "cv_model_rf.rds")
+    saveRDS(recipe_rf, "recipe_rf.rds")
+    saveRDS(workflow_rf, "workflow_rf.rds")
+}
+```
+
+## Boost Model
+
+Then I will fit a Boost Model to predict `INTRATE`. Also, I will use Cross-Validation to choose the best parameters.
+
+```{r}
+require(xgboost)
+
+if (file.exists("tuned_boost.rds")) {
+    
+    model_boost = readRDS("model_boost.rds")
+    recipe_boost = readRDS("recipe_boost.rds")
+    workflow_boost = readRDS("workflow_boost.rds")
+    cv_model_boost = readRDS("cv_model_boost")
+    grid_boost = readRDS("grid_boost.rds")
+    tuned_boost = readRDS("tuned_boost.rds")
+    
+} else {
+
+    set.seed(123)
+    
+    model_boost = boost_tree(
+        mode = "regression",
+        trees = tune(),
+        tree_depth = tune(),
+        learn_rate = tune(),
+        loss_reduction = tune(),
+        sample_size = tune(),
+        mtry = tune()
+    ) %>%
+        set_engine("sgboost")
+    
+    recipe_boost = recipe(INTRATE ~ ., data = set_training)
+    
+    workflow_boost = workflow() %>%
+        add_model(model_boost) %>%
+        add_recipe(recipe_boost)
+    
+    cv_model_boost = vfold_cv(set_training, v = 10)
+    
+    # A promiaxte 
+    grid_boost = grid_latin_hypercube(
+        trees(range = c(100, 1000)),
+        tree_depth(range = c(3, 10)),
+        learn_rate(range = c(-4, -0.5)),
+        loss_reduction(range = c(0, 10)),
+        sample_size = sample_prop(range = c(0.5, 1)),
+        mtry = finalize(mtry(), set_training),
+        size = 30
+    )
+    
+    tuned_boost = tune_grid(
+        workflow_boost,
+        resample = cv_model_boost,
+        grid = grid_boost,
+        metric = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(model_boost, "model_boost.rds")
+    saveRDS(recipe_boost, "recipe_boost.rds")
+    saveRDS(workflow_boost, "workflow_boost.rds")
+    saveRDS(cv_model_boost, "cv_model_boost.rds")
+    saveRDS(grid_boost, "grid_boost.rds")
+    saveRDS(tuned_boost, "tuned_boost.rds")
+} 
+```
+
+
+## Evaluate Model
+
+In this part, I will still use the `rmse` to evaluate the model's performance (The predicting ability). The metric we use is the rmse, and we will compare the 2 tree models to the elastic net model.
+
+```{r}
+pred_tree = predict(model_tree_pruned, newdata = set_test)
+
+rmse(actual = set_test %>% pull(INTRATE), pred = pred_tree)
+```
+
+
+```{r}
+# Insert randomForest
+```
+
+
+
+
+# KNN Model
+
+## Fit Model
+
+In this part, I will use KNN model to predict interest rate on mortgage. Also, choosing parameter `k` is a problem, therefore I will Cross-Validation to choose the best `k`.
+
+```{r}
+set.seed(123)
+
+model_knn = nearest_neighbor(
+    mode = "regression",
+    neighbors = tune(),
+    weight_func = "rectangular"
+) %>%
+    set_engine("kknn")
+
+recipe_knn = recipe(INTRATE ~ ., data = set_training)# %>% step_normalize(all_predictors())
+
+workflow_knn = workflow() %>%
+    add_model(model_knn) %>%
+    add_recipe(recipe_knn)
+
+cv_model_knn = vfold_cv(set_training, v = 10)
+
+grid_knn = tibble(neighbors = 1:30)
+
+tuned_knn = tune_grid(
+    workflow_knn,
+    resamples = cv_model_knn,
+    grid = grid_knn,
+    metric = metric_set(yardstick::rmse),
+    control = control_grid(save_pred = TRUE)
+)
+
+best_k = select_best(tuned_knn, metric = "rmse")
+
+```
+
+## Evaluate Model
+
+Then I will evaluate the KNN model, based on its predicting ability in test set. The metric I use is `rmse`.
+
+
+```{r}
+workflow_final_knn = finalize_workflow(workflow_knn, best_k)
+
+final_fit_knn = fit(workflow_final_knn, data = set_training)
+
+pred_knn = predict(final_fit_knn, new_data = set_test)$.pred
+
+rmse(actual = set_test %>% pull(INTRATE), pred = pred_knn)
+```
+
+
+# Support Vector Regress
+
+```{r}
+require(kernlab)
+
+if (file.exists("tuned_svr.rds")) {
+    
+    model_svr = readRDS("model_svr.rds")
+    recipe_svr = readRDS("recipe_svr.rds")
+    workflow_svr = readRDS("workflow_svr.rds")
+    cv_model_svr = readRDS("cv_model_svr.rds")
+    grid_svr = readRDS("grid_svr.rds")
+    tuned_svr = readRDS("tuned_svr.rds")
+    
+} else {
+    
+    set.seed(123)
+    
+    model_svr = svm_rbf(
+        mode = "regression",
+        cost = tune(),
+        rbf_sigma = tune(),
+        margin = tune()
+    ) %>%
+        set_engine("kernlab")
+    
+    recipe_svr = recipe(INTRATE ~ ., data = set_training)# %>% step_normalize(all_predictors())
+    # I do not normalize the data since I will do it later and compared them.
+    
+    workflow_svr = workflow() %>%
+        add_model(model_svr) %>%
+        add_recipe(recipe_svr)
+    
+    cv_model_svr = vfold_cv(set_training, v = 10)
+    
+    grid_svr = grid_latin_hypercube(
+        cost(range = c(-3, 3)),
+        rbf_sigma(range = c(-3, 1)),
+        margin(range = c(1e-3, 1)),
+        size = 30
+    )
+    
+    tuned_svr = tune_grid(
+        workflow_svr,
+        resamples = cv_model_svr,
+        grid = grid_svr,
+        metric = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(model_svr, "model_svr.rds")
+    saveRDS(recipe_svr, "recipe_svr.rds")
+    saveRDS(workflow_svr, "workflow_svr.rds")
+    saveRDS(cv_model_svr, "cv_model_svr.rds")
+    saveRDS(grid_svr, "grid_svr.rds")
+    saveRDS(tuned_svr, "tuned_svr.rds")
+    
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
