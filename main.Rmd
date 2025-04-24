@@ -379,14 +379,14 @@ Since when `m=p`, the random forest become the bagging method. Therefore we will
 ```{r, tuned_rf, cache=TRUE}
 require(randomForest)
 
-if (file.exists("tuned_rf.rds")) {
+if (file.exists("objects/tuned_rf.rds")) {
     
-    tuned_rf = readRDS("tuned_rf.rds")
-    model_rf = readRDS("model_rf.rds")
-    recipe_rf = readRDS("recipe_rf.rds")
-    cv_model_rf = readRDS("cv_model_rf.rds")
-    workflow_rf = readRDS("workflow_rf.rds")
-    grid_rf = readRDS("grid_rf.rds")
+    tuned_rf = readRDS("objects/tuned_rf.rds")
+    model_rf = readRDS("objects/model_rf.rds")
+    recipe_rf = readRDS("objects/recipe_rf.rds")
+    cv_model_rf = readRDS("objects/cv_model_rf.rds")
+    workflow_rf = readRDS("objects/workflow_rf.rds")
+    grid_rf = readRDS("objects/grid_rf.rds")
     
 } else {
 
@@ -418,14 +418,19 @@ if (file.exists("tuned_rf.rds")) {
         control = control_grid(save_pred = TRUE)
     )
     
-    saveRDS(tuned_rf, "tuned_rf.rds")
-    saveRDS(grid_rf, "grid_rf.rds")
-    saveRDS(model_rf, "model_rf.rds")
-    saveRDS(cv_model_rf, "cv_model_rf.rds")
-    saveRDS(recipe_rf, "recipe_rf.rds")
-    saveRDS(workflow_rf, "workflow_rf.rds")
+    saveRDS(tuned_rf, "objects/tuned_rf.rds")
+    saveRDS(grid_rf, "objects/grid_rf.rds")
+    saveRDS(model_rf, "objects/model_rf.rds")
+    saveRDS(cv_model_rf, "objects/cv_model_rf.rds")
+    saveRDS(recipe_rf, "objects/recipe_rf.rds")
+    saveRDS(workflow_rf, "objects/workflow_rf.rds")
 }
+
+best_params_rf = select_best(tuned_rf, metric = "rmse")
+best_params_rf
 ```
+
+From the output, I can see that best random forest model has 11 predictors with 900 trees.
 
 ## Boost Model
 
@@ -491,7 +496,9 @@ if (file.exists("tuned_boost.rds")) {
     saveRDS(cv_model_boost, "cv_model_boost.rds")
     saveRDS(grid_boost, "grid_boost.rds")
     saveRDS(tuned_boost, "tuned_boost.rds")
-} 
+}
+
+
 ```
 
 
