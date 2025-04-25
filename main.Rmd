@@ -450,17 +450,7 @@ best_params_rf = select_best(tuned_rf, metric = "rmse")
 best_params_rf
 ```
 
-From the output, I can see that best random forest model has 11 predictors with 900 trees. Therefore, I will use it to get the rmse.
-
-```{r}
-workflow_final_rf = finalize_workflow(workflow_rf, best_params_rf)
-
-final_fit_rf = fit(workflow_final_rf, data = set_training)
-
-pred_knn = predict(final_fit_rf, new_data = set_test)$.pred
-
-rmse(actual = set_test %>% pull(INTRATE), pred = pred_knn)
-```
+From the output, I can see that best random forest model has 11 predictors with 900 trees. 
 
 ## Boost Model
 
@@ -468,71 +458,68 @@ Then I will fit a Boost Model to predict `INTRATE`. Also, I will use Cross-Valid
 
 ```{r}
 require(reticulate)
-use_condaenv("xgboost_gpu", required = TRUE)
-xgb = import("xgboost")
-xgb$__version__
 
-if (file.exists("objects/tuned_boost.rds")) {
+use_condaenv("xgboost_gpu", required = TRUE)
+
+xgb = import("xgboost")
+np = import("numpy")
+pd = import("pandas")
+sklearn_model_selection = import("sklearn.model_selection")
+pickle = import("pickle")
+
+if (file.exists("objects/tuned_boost.pkl")) {
     
-    model_boost = readRDS("objects/model_boost.rds")
-    recipe_boost = readRDS("objects/recipe_boost.rds")
-    workflow_boost = readRDS("objects/workflow_boost.rds")
-    cv_model_boost = readRDS("objects/cv_model_boost")
-    grid_boost = readRDS("objects/grid_boost.rds")
-    tuned_boost = readRDS("objects/tuned_boost.rds")
+    model_boost = py_load_object("objects/model_boost.pkl", pickle = "pickle")
+    grid_boost = py_load_object("objects/grid_boost.pkl", pickle = "pickle")
+    tuned_boost = py_load_object("objects/tuned_boost.pkl", pickle = "pickle")
     
 } else {
 
     set.seed(123)
     
-    model_boost = boost_tree(
-        mode = "regression",
-        trees = tune(),
-        tree_depth = tune(),
-        learn_rate = tune(),
-        loss_reduction = tune(),
-        sample_size = tune(),
-        mtry = tune()
-    ) %>%
-        set_engine("xgboost", tree_method = "gpu_hist")
+    X_train = set_training %>% select(-INTRATE)
+    Y_train = set_training %>% pull(INTRATE)
     
-    recipe_boost = recipe(INTRATE ~ ., data = set_training)
+    X_train_np = np$array(as.matrix(X_train))
+    Y_train_np = np$array(Y_train)
     
-    workflow_boost = workflow() %>%
-        add_model(model_boost) %>%
-        add_recipe(recipe_boost)
-    
-    cv_model_boost = vfold_cv(set_training, v = 10)
-    
-    # A promiaxte 
-    grid_boost = grid_latin_hypercube(
-        trees(range = c(100, 1000)),
-        tree_depth(range = c(3, 10)),
-        learn_rate(range = c(-4, -0.5)),
-        loss_reduction(range = c(0, 10)),
-        sample_size = sample_prop(range = c(0.5, 1)),
-        mtry = finalize(mtry(), set_training),
-        size = 30
+    model_boost = xgb$XGBRegressor(
+        objective = "reg:squarederror", # MSE will generate same results with RMSE
+        tree_method = "hist",
+        device = "cuda",
+        verbosity = 3L
     )
     
-    tuned_boost = tune_grid(
-        workflow_boost,
-        resample = cv_model_boost,
-        grid = grid_boost,
-        metric = metric_set(yardstick::rmse),
-        control = control_grid(save_pred = TRUE)
+    grid_boost = dict(
+        max_depth = as.integer(c(4, 5, 6, 7, 8)),
+        learning_rate = c(0.005, 0.01, 0.015,0.02),
+        n_estimators = as.integer(c(300, 500, 700, 1000)),
+        subsample = c(0.5, 0.6, 0.7, 0.8),
+        colsample_bytree = c(0.6, 0.7, 0.8, 1.0)
     )
     
-    saveRDS(model_boost, "objects/model_boost.rds")
-    saveRDS(recipe_boost, "objects/recipe_boost.rds")
-    saveRDS(workflow_boost, "objects/workflow_boost.rds")
-    saveRDS(cv_model_boost, "objects/cv_model_boost.rds")
-    saveRDS(grid_boost, "objects/grid_boost.rds")
-    saveRDS(tuned_boost, "objects/tuned_boost.rds")
+    tuned_boost = sklearn_model_selection$GridSearchCV(
+        estimator = model_boost,
+        param_grid = grid_boost,
+        cv = 10L,
+        scoring = "neg_root_mean_squared_error",
+        verbose = 2L,
+        n_jobs = -1L
+    )
+    
+    tuned_boost$fit(X_train_np, Y_train_np)
+    
+    
+    py_save_object(model_boost, "objects/model_boost.pkl", pickle = "pickle")
+    py_save_object(grid_boost, "objects/grid_boost.pkl", pickle = "pickle")
+    py_save_object(tuned_boost, "objects/tuned_boost.pkl", pickle = "pickle")
 }
 
-
+best_params_boost = tuned_boost$best_params_
+best_params_boost
 ```
+
+From the output, I can see that best boosting tree parameters when I use it. 
 
 
 ## Evaluate Model
@@ -545,12 +532,45 @@ pred_tree = predict(model_tree_pruned, newdata = set_test)
 rmse(actual = set_test %>% pull(INTRATE), pred = pred_tree)
 ```
 
+From the output, I can see the pruned tree's RMSE is 1.587198.
+
 
 ```{r}
-# Insert randomForest
+workflow_final_rf = finalize_workflow(workflow_rf, best_params_rf)
+
+if (file.exists("objects/final_fit_rf.rds")) {
+    
+    final_fit_rf = readRDS("objects/final_fit_rf.rds")
+    
+} else {
+
+    final_fit_rf = fit(workflow_final_rf, data = set_training)
+    
+    saveRDS(final_fit_rf, "objects/final_fit_rf.rds")
+    
+}
+
+pred_rf = predict(final_fit_rf, new_data = set_test)$.pred
+
+rmse(actual = set_test %>% pull(INTRATE), pred = pred_rf)
 ```
 
+From the output, I can see that random Forest's RMSE is 1.397984, which is significantly lower than elastic net and pruned tree.
 
+```{r}
+X_test = set_test %>% select(-INTRATE)
+Y_test = set_test %>% pull(INTRATE)
+
+X_test_np = np$array(as.matrix(X_test))
+Y_test_np = np$array(Y_test)
+
+best_model_boost = tuned_boost$best_estimator_
+pred_boost_np = best_model_boost$predict(X_test_np)
+
+rmse(actual = set_test %>% pull(INTRATE), pred = pred_boost_np)
+```
+
+Therefore, I get the boosting tree's RMSE is 1.379319, which is lower than random forest. Therefore, now boosting tree is the best predicting model.
 
 
 # KNN Model
@@ -560,6 +580,8 @@ rmse(actual = set_test %>% pull(INTRATE), pred = pred_tree)
 In this part, I will use KNN model to predict interest rate on mortgage. Also, choosing parameter `k` is a problem, therefore I will Cross-Validation to choose the best `k`.
 
 ```{r}
+require(kknn)
+
 if (file.exists("objects/tuned_knn.rds")) {
     
     model_knn = readRDS("objects/model_knn.rds")
@@ -594,7 +616,7 @@ if (file.exists("objects/tuned_knn.rds")) {
         workflow_knn,
         resamples = cv_model_knn,
         grid = grid_knn,
-        metric = metric_set(yardstick::rmse),
+        metrics = metric_set(yardstick::rmse),
         control = control_grid(save_pred = TRUE)
     )
     
@@ -628,72 +650,241 @@ pred_knn = predict(final_fit_knn, new_data = set_test)$.pred
 rmse(actual = set_test %>% pull(INTRATE), pred = pred_knn)
 ```
 
-I can see that the rmse of kNN model is 1.459248. This rmse value is significantly smaller than elastic net. 
+I can see that the rmse of kNN model is 1.459248. This RMSE value is significantly smaller than elastic net. But it is larger than random forest and boosting tree. Therefore, until now, the boosting tree is still the best model.
 
 
 # Support Vector Regress
 
+I will use library `kernlab` not `e1071`, since library `kernlab` is much faster than `e1071`. Also, `kernlab` support `tidymodels` therefore it is easier to tune the model.
+
+In this question, I will try 3 kinds of kernels, which are `linear`, `polynomial` and `Radial`.
+
 ```{r}
 require(kernlab)
 
-if (file.exists("tuned_svr.rds")) {
+# kernel == linear
+if (file.exists("objects/tuned_svr_linear.rds")) {
     
-    model_svr = readRDS("objects/model_svr.rds")
-    recipe_svr = readRDS("objects/recipe_svr.rds")
-    workflow_svr = readRDS("objects/workflow_svr.rds")
-    cv_model_svr = readRDS("objects/cv_model_svr.rds")
-    grid_svr = readRDS("objects/grid_svr.rds")
-    tuned_svr = readRDS("objects/tuned_svr.rds")
+    model_svr_linear = readRDS("objects/model_svr_linear.rds")
+    recipe_svr_linear = readRDS("objects/recipe_svr_linear.rds")
+    workflow_svr_linear = readRDS("objects/workflow_svr_linear.rds")
+    cv_model_svr_linear = readRDS("objects/cv_model_svr_linear.rds")
+    grid_svr_linear = readRDS("objects/grid_svr_linear.rds")
+    tuned_svr_linear = readRDS("objects/tuned_svr_linear.rds")
     
 } else {
     
     set.seed(123)
     
-    model_svr = svm_rbf(
+    model_svr_linear = svm_linear(
         mode = "regression",
-        cost = tune(),
-        rbf_sigma = tune(),
-        margin = tune()
+        cost = tune()
     ) %>%
         set_engine("kernlab")
     
-    recipe_svr = recipe(INTRATE ~ ., data = set_training)# %>% step_normalize(all_predictors())
+    recipe_svr_linear = recipe(INTRATE ~ ., data = set_training)# %>% step_normalize(all_predictors())
     # I do not normalize the data since I will do it later and compared them.
     
-    workflow_svr = workflow() %>%
-        add_model(model_svr) %>%
-        add_recipe(recipe_svr)
+    workflow_svr_linear = workflow() %>%
+        add_model(model_svr_linear) %>%
+        add_recipe(recipe_svr_linear)
     
-    cv_model_svr = vfold_cv(set_training, v = 10)
+    cv_model_svr_linear = vfold_cv(set_training, v = 10)
     
-    grid_svr = grid_latin_hypercube(
-        cost(range = c(-3, 3)),
-        rbf_sigma(range = c(-3, 1)),
-        margin(range = c(1e-3, 1)),
-        size = 30
+    grid_svr_linear = tibble(
+        cost = c(1e-4, 1e-3, 1e-2, 1e-1, 1, 1e1, 1e2, 1e3, 1e4)
     )
     
-    tuned_svr = tune_grid(
-        workflow_svr,
-        resamples = cv_model_svr,
-        grid = grid_svr,
-        metric = metric_set(yardstick::rmse),
+    tuned_svr_linear = tune_grid(
+        workflow_svr_linear,
+        resamples = cv_model_svr_linear,
+        grid = grid_svr_linear,
+        metrics = metric_set(yardstick::rmse),
         control = control_grid(save_pred = TRUE)
     )
     
-    saveRDS(model_svr, "objects/model_svr.rds")
-    saveRDS(recipe_svr, "objects/recipe_svr.rds")
-    saveRDS(workflow_svr, "objects/workflow_svr.rds")
-    saveRDS(cv_model_svr, "objects/cv_model_svr.rds")
-    saveRDS(grid_svr, "objects/grid_svr.rds")
-    saveRDS(tuned_svr, "objects/tuned_svr.rds")
+    saveRDS(model_svr_linear, "objects/model_svr_linear.rds")
+    saveRDS(recipe_svr_linear, "objects/recipe_svr_linear.rds")
+    saveRDS(workflow_svr_linear, "objects/workflow_svr_linear.rds")
+    saveRDS(cv_model_svr_linear, "objects/cv_model_svr_linear.rds")
+    saveRDS(grid_svr_linear, "objects/grid_svr_linear.rds")
+    saveRDS(tuned_svr_linear, "objects/tuned_svr_linear.rds")
     
 }
+
+# Kernel == Polynomial
+if (file.exists("objects/tuned_svr_poly.rds")) {
+    
+    model_svr_poly = readRDS("objects/model_svr_poly.rds")
+    recipe_svr_poly = readRDS("objects/recipe_svr_poly.rds")
+    workflow_svr_poly = readRDS("objects/workflow_svr_poly.rds")
+    cv_model_svr_poly = readRDS("objects/cv_model_svr_poly.rds")
+    grid_svr_poly = readRDS("objects/grid_svr_poly.rds")
+    tuned_svr_poly = readRDS("objects/tuned_svr_poly.rds")
+    
+} else {
+    
+    set.seed(123)
+    
+    model_svr_poly = svm_poly(
+        mode = "regression",
+        cost = tune(),
+        degree = tune()
+    ) %>%
+        set_engine("kernlab")
+    
+    recipe_svr_poly = recipe(INTRATE ~ ., data = set_training)# %>% step_normalize(all_predictors())
+    # I do not normalize the data since I will do it later and compared them.
+    
+    workflow_svr_poly = workflow() %>%
+        add_model(model_svr_poly) %>%
+        add_recipe(recipe_svr_poly)
+    
+    cv_model_svr_poly = vfold_cv(set_training, v = 10)
+    
+    grid_svr_poly = crossing(
+        cost = c(1e-4, 1e-3, 1e-2, 1e-1, 1, 1e1, 1e2, 1e3, 1e4),
+        degree = c(2L, 3L, 4L, 5L)
+    )
+    
+    tuned_svr_poly = tune_grid(
+        workflow_svr_poly,
+        resamples = cv_model_svr_poly,
+        grid = grid_svr_poly,
+        metrics = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(model_svr_poly, "objects/model_svr_poly.rds")
+    saveRDS(recipe_svr_poly, "objects/recipe_svr_poly.rds")
+    saveRDS(workflow_svr_poly, "objects/workflow_svr_poly.rds")
+    saveRDS(cv_model_svr_poly, "objects/cv_model_svr_poly.rds")
+    saveRDS(grid_svr_poly, "objects/grid_svr_poly.rds")
+    saveRDS(tuned_svr_poly, "objects/tuned_svr_poly.rds")
+    
+}
+
+
+# Kernel == Radial
+if (file.exists("objects/tuned_svr_rbf.rds")) {
+    
+    model_svr_rbf = readRDS("objects/model_svr_rbf.rds")
+    recipe_svr_rbf = readRDS("objects/recipe_svr_rbf.rds")
+    workflow_svr_rbf = readRDS("objects/workflow_svr_rbf.rds")
+    cv_model_svr_rbf = readRDS("objects/cv_model_svr_rbf.rds")
+    grid_svr_rbf = readRDS("objects/grid_svr_rbf.rds")
+    tuned_svr_rbf = readRDS("objects/tuned_svr_rbf.rds")
+    
+} else {
+    
+    set.seed(123)
+    
+    model_svr_rbf = svm_rbf(
+        mode = "regression",
+        cost = tune(),
+        rbf_sigma = tune()
+    ) %>%
+        set_engine("kernlab")
+    
+    recipe_svr_rbf = recipe(INTRATE ~ ., data = set_training)# %>% step_normalize(all_predictors())
+    # I do not normalize the data since I will do it later and compared them.
+    
+    workflow_svr_rbf = workflow() %>%
+        add_model(model_svr_rbf) %>%
+        add_recipe(recipe_svr_rbf)
+    
+    cv_model_svr_rbf = vfold_cv(set_training, v = 10)
+    
+    grid_svr_rbf = grid_latin_hypercube(
+        cost(range = c(-4, 4)),
+        rbf_sigma(range = c(-3, 1)),
+        size = 40
+    )
+    
+    tuned_svr_rbf = tune_grid(
+        workflow_svr_rbf,
+        resamples = cv_model_svr_rbf,
+        grid = grid_svr_rbf,
+        metrics = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(model_svr_rbf, "objects/model_svr_rbf.rds")
+    saveRDS(recipe_svr_rbf, "objects/recipe_svr_rbf.rds")
+    saveRDS(workflow_svr_rbf, "objects/workflow_svr_rbf.rds")
+    saveRDS(cv_model_svr_rbf, "objects/cv_model_svr_rbf.rds")
+    saveRDS(grid_svr_rbf, "objects/grid_svr_rbf.rds")
+    saveRDS(tuned_svr_rbf, "objects/tuned_svr_rbf.rds")
+    
+}
+
+
 ```
 
 
+## Evaluate the SVR Model
+
+In this section, I will evaluate their predicting performance by their RMSE of test value. I will test all 3 best SVR models based on different kernels.
+
+```{r}
+best_params_svr_linear = select_best(tuned_svr_linear, metric = "rmse")
+best_params_svr_poly = select_best(tuned_svr_poly, metric = "rmse")
+best_params_svr_rbf = select_best(tuned_svr_rbf, metric = "rmse")
+
+workflow_final_svr_linear = finalize_workflow(workflow_svr_linear, best_params_svr_linear)
+workflow_final_svr_poly = finalize_workflow(workflow_svr_poly, best_params_svr_poly)
+workflow_final_svr_rbf = finalize_workflow(workflow_svr_rbf, best_params_svr_rbf)
+
+final_fit_svr_linear = fit(workflow_final_svr_linear, data = set_training)
+final_fit_svr_poly = fit(workflow_final_svr_poly, data = set_training)
+final_fit_svr_rbf = fit(workflow_final_svr_rbf, data = set_training)
+
+pred_svr_linear = predict(final_fit_svr_linear, new_data = set_test)$.pred
+pred_svr_poly = predict(final_fit_svr_poly, new_data = set_test)$.pred
+pred_svr_rbf = predict(final_fit_svr_rbf, new_data = set_test)$.pred
+
+# RMSE of kernel == linear
+rmse(actual = set_test %>% pull(INTRATE), pred_svr_linear)
+
+# RMSE of kernel == polynomial
+rmse(actual = set_test %>% pull(INTRATE), pred_svr_poly)
+
+# RMSE of kernel == radian
+rmse(actual = set_test %>% pull(INTRATE), pred_svr_rbf)
+```
+
+From the output, I can see that all model is worse than the random forest and boosting tree. Therefore I will not choose the SVR models.
 
 
+# PCA
+
+I will not do PCA since it is unsupervised learning method. PCA's main goal is to preserve most of variance of predictors when we do Dimensional reduction. The unsupervised learning algorithm will not be helpful in predicting `INTRATE`, therefore I will not do it.
+
+# Summary
+
+In this unscaled data, for predicting, the final model is boosting tree.
+
+***
+***
+***
+***
+
+
+# Scaling data and Run again
+
+I will scale the dataset, which makes the numerical predictors has the same mean (0) and the same variance (1). In this part, I will not do tree models, including boosting tree and random forest, since scaling has no influence on tree model.
+
+## Data Preprocessing
+
+```{r}
+# INSERT
+```
+
+## Linear Regression, lasso, ridge, elastic net, with scaled data
+
+```{r}
+# INSERT
+```
 
 
 
