@@ -216,7 +216,8 @@ cv_model_mlr_lasso = cv.glmnet(X, Y, alpha = 1,
                                thresh = 1e-10,
                                maxit = 1e6,
                                lambda.min.ratio = 1e-5,
-                               nlambda = 1000)
+                               nlambda = 1000,
+                               standardize = FALSE)
 ```
 
 ### RIDGE for MLR
@@ -240,7 +241,8 @@ cv_model_mlr_ridge = cv.glmnet(X, Y, alpha = 0,
                                thresh = 1e-10,
                                maxit = 1e6,
                                lambda.min.ratio = 1e-5,
-                               nlambda = 1000)
+                               nlambda = 1000,
+                               standardize = FALSE)
 ```
 
 
@@ -263,7 +265,7 @@ if (file.exists("objects/tuned_elastic_net.rds")) {
     set.seed(123)
 
     model_elastic_net = linear_reg(penalty = tune(), mixture = tune()) %>%
-        set_engine("glmnet")
+        set_engine("glmnet", standardize = FALSE)
 
     recipe_elastic_net = recipe(INTRATE ~ ., data = set_training) %>%
         step_dummy(all_nominal_predictors())
@@ -351,7 +353,7 @@ rmse(actual = set_test %>% pull(INTRATE), pred = pred_elastic_net)
 
 ## Summary of Linear Model
 
-From the output, we can see that the elastic net have lowest RMSE, which means we will choose the Elastic Net as final model for linear regression.
+From the output, we can see that the Ridge model has lowest RMSE, which means its predicting is best.
 
 # Tree Model
 
@@ -877,21 +879,455 @@ I will scale the dataset, which makes the numerical predictors has the same mean
 ## Data Preprocessing
 
 ```{r}
-# INSERT
+scaler_prepare = set_training %>%
+    select(-INTRATE) %>%
+    select(-where(is.factor)) %>%
+    summarise(across(everything(), list(mean = mean, sd = sd)))
+
+scale_method = function(data) {
+    
+    data_ = data
+    
+    data_$AMMORT = (data_$AMMORT - scaler_prepare$AMMORT_mean) / scaler_prepare$AMMORT_sd
+    data_$PMTONLY = (data_$PMTONLY - scaler_prepare$PMTONLY_mean) / scaler_prepare$PMTONLY_sd
+    data_$REFICSHAMT = (data_$REFICSHAMT - scaler_prepare$REFICSHAMT_mean) / scaler_prepare$REFICSHAMT_sd
+    data_$MORTADDTN = (data_$MORTADDTN - scaler_prepare$MORTADDTN_mean) / scaler_prepare$MORTADDTN_sd
+    data_$HELOCLIM = (data_$HELOCLIM - scaler_prepare$HELOCLIM_mean) / scaler_prepare$HELOCLIM_sd
+    data_$PMTAMT = (data_$PMTAMT - scaler_prepare$PMTAMT_mean) / scaler_prepare$PMTAMT_sd
+    
+    return(data_)
+    
+}
+
+
+# Seeing effect
+scale_method(set_training) %>%
+    select(-INTRATE) %>%
+    select(-where(is.factor)) %>%
+    summarise(across(everything(), list(mean = mean, sd = sd)))
+
 ```
+
+From the output, we can see this scaling is good.
+
+```{r}
+# Deploy scaler to training and test set
+set_training_scaled = scale_method(set_training)
+set_test_scaled = scale_method(set_test)
+
+```
+
 
 ## Linear Regression, lasso, ridge, elastic net, with scaled data
 
+### LASSO for MLR
+
 ```{r}
-# INSERT
+set.seed(123)
+
+X_scaled = model.matrix(INTRATE ~ ., data = set_training_scaled)[, -1]
+Y_scaled = set_training_scaled$INTRATE
+
+model_mlr_lasso_scaled = glmnet(X_scaled, Y_scaled, alpha = 1)
+
+plot(model_mlr_lasso_scaled, xvar = "lambda", label = TRUE)
+```
+
+Use Cross-Validation to find the best $\lambda$.
+
+```{r}
+set.seed(123)
+
+cv_model_mlr_lasso_scaled = cv.glmnet(X_scaled, Y_scaled, alpha = 1,
+                               nfolds = 10,
+                               type.measure = "mse",
+                               thresh = 1e-10,
+                               maxit = 1e6,
+                               lambda.min.ratio = 1e-5,
+                               nlambda = 1000)
+```
+
+### RIDGE for MLR
+
+```{r}
+set.seed(123)
+
+model_mlr_ridge_scaled = glmnet(X_scaled, Y_scaled, alpha = 0)
+
+plot(model_mlr_ridge_scaled, xvar = "lambda", label = TRUE)
+```
+
+Use Cross-Validation to find the best $\lambda$.
+
+```{r}
+set.seed(123)
+
+cv_model_mlr_ridge_scaled = cv.glmnet(X_scaled, Y_scaled, alpha = 0,
+                               nfolds = 10,
+                               type.measure = "mse",
+                               thresh = 1e-10,
+                               maxit = 1e6,
+                               lambda.min.ratio = 1e-5,
+                               nlambda = 1000)
+```
+
+### Elastic Net for MLR
+
+```{r}
+if (file.exists("scaled_objs/tuned_elastic_net_scaled.rds")) {
+    
+    model_elastic_net_scaled = readRDS("scaled_objs/model_elastic_net_scaled.rds")
+    recipe_elastic_net_scaled = readRDS("scaled_objs/recipe_elastic_net_scaled.rds")
+    cv_model_mlr_elastic_net_scaled = readRDS("scaled_objs/cv_model_mlr_elastic_net_scaled.rds")
+    workflow_elastic_net_scaled = readRDS("scaled_objs/workflow_elastic_net_scaled.rds")
+    grid_elastic_net_scaled = readRDS("scaled_objs/grid_elastic_net_scaled.rds")
+    tuned_elastic_net_scaled = readRDS("scaled_objs/tuned_elastic_net_scaled.rds")
+    
+} else {
+
+    set.seed(123)
+
+    model_elastic_net_scaled = linear_reg(penalty = tune(), mixture = tune()) %>%
+        set_engine("glmnet")
+
+    recipe_elastic_net_scaled = recipe(INTRATE ~ ., data = set_training_scaled) %>%
+        step_dummy(all_nominal_predictors())
+
+    cv_model_mlr_elastic_net_scaled = vfold_cv(set_training_scaled, v = 10)
+
+    workflow_elastic_net_scaled = workflow() %>%
+        add_model(model_elastic_net_scaled) %>%
+        add_recipe(recipe_elastic_net_scaled)
+
+    grid_elastic_net_scaled = grid_regular(
+        penalty(range = c(-4, 1)),
+        mixture(range = c(0, 1)),
+        levels = c(penalty = 100, mixture = 100)
+    )
+
+    tuned_elastic_net_scaled = tune_grid(
+        workflow_elastic_net_scaled,
+        resamples = cv_model_mlr_elastic_net_scaled,
+        grid = grid_elastic_net_scaled,
+        metrics = metric_set(yardstick::rmse)
+    )
+    
+    saveRDS(model_elastic_net_scaled, "scaled_objs/model_elastic_net_scaled.rds")
+    saveRDS(recipe_elastic_net_scaled, "scaled_objs/recipe_elastic_net_scaled.rds")
+    saveRDS(cv_model_mlr_elastic_net_scaled, "scaled_objs/cv_model_mlr_elastic_net_scaled.rds")
+    saveRDS(workflow_elastic_net_scaled, "scaled_objs/workflow_elastic_net_scaled.rds")
+    saveRDS(grid_elastic_net_scaled, "scaled_objs/grid_elastic_net_scaled.rds")
+    saveRDS(tuned_elastic_net_scaled, "scaled_objs/tuned_elastic_net_scaled.rds")
+
+}
+
+best_params_elastic_net_scaled = select_best(tuned_elastic_net_scaled, metric = "rmse")
+best_params_elastic_net_scaled
+```
+
+#### Evaluate Model
+
+### Evaluate Lasso Model
+
+```{r}
+X_test_scaled = model.matrix(INTRATE ~ ., data = set_test_scaled)[, -1]
+
+pred_lasso_scaled = predict(cv_model_mlr_lasso_scaled, newx = X_test_scaled, s = cv_model_mlr_lasso_scaled$lambda.min)
+
+rmse(actual = set_test_scaled %>% pull(INTRATE), pred = pred_lasso_scaled)
+```
+
+### Evaluate Ridge Model
+
+```{r}
+pred_ridge_scaled = predict(cv_model_mlr_ridge_scaled, newx = X_test_scaled, s = cv_model_mlr_ridge_scaled$lambda.min)
+
+rmse(actual = set_test_scaled %>% pull(INTRATE), pred = pred_ridge_scaled)
+```
+
+### Evaluate Elastic Net
+
+```{r}
+workflow_final_elastic_net_scaled = finalize_workflow(
+    workflow_elastic_net_scaled,
+    best_params_elastic_net_scaled
+)
+
+final_fit_scaled = fit(workflow_final_elastic_net_scaled, data = set_training_scaled)
+
+pred_elastic_net_scaled = predict(final_fit_scaled, new_data = set_test_scaled)$.pred
+
+rmse(actual = set_test_scaled %>% pull(INTRATE), pred = pred_elastic_net_scaled)
+```
+
+From the output, I can see that the scaled elastic net model is the best, also better than unscaled mlr shrinkage model. But the model is worse than the boosting tree. Therefore, until now, boosting tree is still the best model.
+
+
+## knn Model with scaled data
+
+```{r}
+
+if (file.exists("scaled_objs/tuned_knn_scaled.rds")) {
+    
+    model_knn_scaled = readRDS("scaled_objs/model_knn_scaled.rds")
+    recipe_knn_scaled = readRDS("scaled_objs/recipe_knn_scaled.rds")
+    workflow_knn_scaled = readRDS("scaled_objs/workflow_knn_scaled.rds")
+    cv_model_knn_scaled = readRDS("scaled_objs/cv_model_knn_scaled.rds")
+    grid_knn_scaled = readRDS("scaled_objs/grid_knn_scaled.rds")
+    tuned_knn_scaled = readRDS("scaled_objs/tuned_knn_scaled.rds")
+    
+} else {
+
+    set.seed(123)
+
+    model_knn_scaled = nearest_neighbor(
+        mode = "regression",
+        neighbors = tune(),
+        weight_func = "rectangular"
+    ) %>%
+        set_engine("kknn")
+
+    recipe_knn_scaled = recipe(INTRATE ~ ., data = set_training_scaled)# %>% step_normalize(all_predictors())
+
+    workflow_knn_scaled = workflow() %>%
+        add_model(model_knn_scaled) %>%
+        add_recipe(recipe_knn_scaled)
+
+    cv_model_knn_scaled = vfold_cv(set_training_scaled, v = 10)
+
+    grid_knn_scaled = tibble(neighbors = 1:30)
+
+    tuned_knn_scaled = tune_grid(
+        workflow_knn_scaled,
+        resamples = cv_model_knn_scaled,
+        grid = grid_knn_scaled,
+        metrics = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(model_knn_scaled, "scaled_objs/model_knn_scaled.rds")
+    saveRDS(recipe_knn_scaled, "scaled_objs/recipe_knn_scaled.rds")
+    saveRDS(workflow_knn_scaled, "scaled_objs/workflow_knn_scaled.rds")
+    saveRDS(cv_model_knn_scaled, "scaled_objs/cv_model_knn_scaled.rds")
+    saveRDS(grid_knn_scaled, "scaled_objs/grid_knn_scaled.rds")
+    saveRDS(tuned_knn_scaled, "scaled_objs/tuned_knn_scaled.rds")
+}
+    
+best_k_scaled = select_best(tuned_knn_scaled, metric = "rmse")
+
+best_k_scaled
 ```
 
 
+### Evaluate KNN scaled Model
 
 
+```{r}
+workflow_final_knn_scaled = finalize_workflow(workflow_knn_scaled, best_k_scaled)
+
+final_fit_knn_scaled = fit(workflow_final_knn_scaled, data = set_training_scaled)
+
+pred_knn_scaled = predict(final_fit_knn_scaled, new_data = set_test_scaled)$.pred
+
+rmse(actual = set_test_scaled %>% pull(INTRATE), pred = pred_knn_scaled)
+```
+
+From the output, we get the same result from KNN without scaling. It is still worse than boosting tree.
+
+## Support Vector Regress
+
+```{r}
+# kernel == linear
+if (file.exists("scaled_objs/tuned_svr_linear_scaled.rds")) {
+    
+    model_svr_linear_scaled = readRDS("scaled_objs/model_svr_linear_scaled.rds")
+    recipe_svr_linear_scaled = readRDS("scaled_objs/recipe_svr_linear_scaled.rds")
+    workflow_svr_linear_scaled = readRDS("scaled_objs/workflow_svr_linear_scaled.rds")
+    cv_model_svr_linear_scaled = readRDS("scaled_objs/cv_model_svr_linear_scaled.rds")
+    grid_svr_linear_scaled = readRDS("scaled_objs/grid_svr_linear_scaled.rds")
+    tuned_svr_linear_scaled = readRDS("scaled_objs/tuned_svr_linear_scaled.rds")
+    
+} else {
+    
+    set.seed(123)
+    
+    model_svr_linear_scaled = svm_linear(
+        mode = "regression",
+        cost = tune()
+    ) %>%
+        set_engine("kernlab")
+    
+    recipe_svr_linear_scaled = recipe(INTRATE ~ ., data = set_training_scaled)
+    
+    workflow_svr_linear_scaled = workflow() %>%
+        add_model(model_svr_linear_scaled) %>%
+        add_recipe(recipe_svr_linear_scaled)
+    
+    cv_model_svr_linear_scaled = vfold_cv(set_training_scaled, v = 10)
+    
+    grid_svr_linear_scaled = tibble(
+        cost = c(1e-4, 1e-3, 1e-2, 1e-1, 1, 1e1, 1e2, 1e3, 1e4)
+    )
+    
+    tuned_svr_linear_scaled = tune_grid(
+        workflow_svr_linear_scaled,
+        resamples = cv_model_svr_linear_scaled,
+        grid = grid_svr_linear_scaled,
+        metrics = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(model_svr_linear_scaled, "scaled_objs/model_svr_linear_scaled.rds")
+    saveRDS(recipe_svr_linear_scaled, "scaled_objs/recipe_svr_linear_scaled.rds")
+    saveRDS(workflow_svr_linear_scaled, "scaled_objs/workflow_svr_linear_scaled.rds")
+    saveRDS(cv_model_svr_linear_scaled, "scaled_objs/cv_model_svr_linear_scaled.rds")
+    saveRDS(grid_svr_linear_scaled, "scaled_objs/grid_svr_linear_scaled.rds")
+    saveRDS(tuned_svr_linear_scaled, "scaled_objs/tuned_svr_linear_scaled.rds")
+    
+}
+
+# Kernel == Polynomial
+if (file.exists("scaled_objs/tuned_svr_poly_scaled.rds")) {
+    
+    model_svr_poly_scaled = readRDS("scaled_objs/model_svr_poly_scaled.rds")
+    recipe_svr_poly_scaled = readRDS("scaled_objs/recipe_svr_poly_scaled.rds")
+    workflow_svr_poly_scaled = readRDS("scaled_objs/workflow_svr_poly_scaled.rds")
+    cv_model_svr_poly_scaled = readRDS("scaled_objs/cv_model_svr_poly_scaled.rds")
+    grid_svr_poly_scaled = readRDS("scaled_objs/grid_svr_poly_scaled.rds")
+    tuned_svr_poly_scaled = readRDS("scaled_objs/tuned_svr_poly_scaled.rds")
+    
+} else {
+    
+    set.seed(123)
+    
+    model_svr_poly_scaled = svm_poly(
+        mode = "regression",
+        cost = tune(),
+        degree = tune()
+    ) %>%
+        set_engine("kernlab")
+    
+    recipe_svr_poly_scaled = recipe(INTRATE ~ ., data = set_training_scaled)# %>% step_normalize(all_predictors())
+    # I do not normalize the data since I will do it later and compared them.
+    
+    workflow_svr_poly_scaled = workflow() %>%
+        add_model(model_svr_poly_scaled) %>%
+        add_recipe(recipe_svr_poly_scaled)
+    
+    cv_model_svr_poly_scaled = vfold_cv(set_training_scaled, v = 10)
+    
+    grid_svr_poly_scaled = crossing(
+        cost = c(1e-4, 1e-3, 1e-2, 1e-1, 1, 1e1, 1e2, 1e3, 1e4),
+        degree = c(2L, 3L, 4L, 5L)
+    )
+    
+    tuned_svr_poly_scaled = tune_grid(
+        workflow_svr_poly_scaled,
+        resamples = cv_model_svr_poly_scaled,
+        grid = grid_svr_poly_scaled,
+        metrics = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(model_svr_poly_scaled, "scaled_objs/model_svr_poly_scaled.rds")
+    saveRDS(recipe_svr_poly_scaled, "scaled_objs/recipe_svr_poly_scaled.rds")
+    saveRDS(workflow_svr_poly_scaled, "scaled_objs/workflow_svr_poly_scaled.rds")
+    saveRDS(cv_model_svr_poly_scaled, "scaled_objs/cv_model_svr_poly_scaled.rds")
+    saveRDS(grid_svr_poly_scaled, "scaled_objs/grid_svr_poly_scaled.rds")
+    saveRDS(tuned_svr_poly_scaled, "scaled_objs/tuned_svr_poly_scaled.rds")
+    
+}
 
 
+# Kernel == Radial
+if (file.exists("scaled_objs/tuned_svr_rbf_scaled.rds")) {
+    
+    model_svr_rbf_scaled = readRDS("scaled_objs/model_svr_rbf_scaled.rds")
+    recipe_svr_rbf_scaled = readRDS("scaled_objs/recipe_svr_rbf_scaled.rds")
+    workflow_svr_rbf_scaled = readRDS("scaled_objs/workflow_svr_rbf_scaled.rds")
+    cv_model_svr_rbf_scaled = readRDS("scaled_objs/cv_model_svr_rbf_scaled.rds")
+    grid_svr_rbf_scaled = readRDS("scaled_objs/grid_svr_rbf_scaled.rds")
+    tuned_svr_rbf_scaled = readRDS("scaled_objs/tuned_svr_rbf_scaled.rds")
+    
+} else {
+    
+    set.seed(123)
+    
+    model_svr_rbf_scaled = svm_rbf(
+        mode = "regression",
+        cost = tune(),
+        rbf_sigma = tune()
+    ) %>%
+        set_engine("kernlab")
+    
+    recipe_svr_rbf_scaled = recipe(INTRATE ~ ., data = set_training_scaled)# %>% step_normalize(all_predictors())
+    # I do not normalize the data since I will do it later and compared them.
+    
+    workflow_svr_rbf_scaled = workflow() %>%
+        add_model(model_svr_rbf_scaled) %>%
+        add_recipe(recipe_svr_rbf_scaled)
+    
+    cv_model_svr_rbf_scaled = vfold_cv(set_training_scaled, v = 10)
+    
+    grid_svr_rbf_scaled = grid_latin_hypercube(
+        cost(range = c(-4, 4)),
+        rbf_sigma(range = c(-3, 1)),
+        size = 40
+    )
+    
+    tuned_svr_rbf_scaled = tune_grid(
+        workflow_svr_rbf_scaled,
+        resamples = cv_model_svr_rbf_scaled,
+        grid = grid_svr_rbf_scaled,
+        metrics = metric_set(yardstick::rmse),
+        control = control_grid(save_pred = TRUE)
+    )
+    
+    saveRDS(model_svr_rbf_scaled, "scaled_objs/model_svr_rbf_scaled.rds")
+    saveRDS(recipe_svr_rbf_scaled, "scaled_objs/recipe_svr_rbf_scaled.rds")
+    saveRDS(workflow_svr_rbf_scaled, "scaled_objs/workflow_svr_rbf_scaled.rds")
+    saveRDS(cv_model_svr_rbf_scaled, "scaled_objs/cv_model_svr_rbf_scaled.rds")
+    saveRDS(grid_svr_rbf_scaled, "scaled_objs/grid_svr_rbf_scaled.rds")
+    saveRDS(tuned_svr_rbf_scaled, "scaled_objs/tuned_svr_rbf_scaled.rds")
+    
+}
 
 
+```
+
+## Evaluate SVR models
+
+```{r}
+best_params_svr_linear_scaled = select_best(tuned_svr_linear_scaled, metric = "rmse")
+best_params_svr_poly_scaled = select_best(tuned_svr_poly_scaled, metric = "rmse")
+best_params_svr_rbf_scaled = select_best(tuned_svr_rbf_scaled, metric = "rmse")
+
+workflow_final_svr_linear_scaled = finalize_workflow(workflow_svr_linear_scaled, best_params_svr_linear_scaled)
+workflow_final_svr_poly_scaled = finalize_workflow(workflow_svr_poly_scaled, best_params_svr_poly_scaled)
+workflow_final_svr_rbf_scaled = finalize_workflow(workflow_svr_rbf_scaled, best_params_svr_rbf_scaled)
+
+final_fit_svr_linear_scaled = fit(workflow_final_svr_linear_scaled, data = set_training_scaled)
+final_fit_svr_poly_scaled = fit(workflow_final_svr_poly_scaled, data = set_training_scaled)
+final_fit_svr_rbf_scaled = fit(workflow_final_svr_rbf_scaled, data = set_training_scaled)
+
+pred_svr_linear_scaled = predict(final_fit_svr_linear_scaled, new_data = set_test_scaled)$.pred
+pred_svr_poly_scaled = predict(final_fit_svr_poly_scaled, new_data = set_test_scaled)$.pred
+pred_svr_rbf_scaled = predict(final_fit_svr_rbf_scaled, new_data = set_test_scaled)$.pred
+
+# RMSE of kernel == linear
+rmse(actual = set_test_scaled %>% pull(INTRATE), pred_svr_linear_scaled)
+
+# RMSE of kernel == polynomial
+rmse(actual = set_test_scaled %>% pull(INTRATE), pred_svr_poly_scaled)
+
+# RMSE of kernel == radian
+rmse(actual = set_test_scaled %>% pull(INTRATE), pred_svr_rbf_scaled)
+```
+
+All scaled SVR model is worse than boosting tree.
+
+# Summary
+
+Boosting tree is best.
 
 
