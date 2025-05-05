@@ -190,6 +190,20 @@ summary(model_mlr_full)
 
 Some `NA` values appeared. It means the data, the design matrix have some multi-linear relationship between predictors. Then use Shrinkage Method is suitable.
 
+### Stepwise
+
+```{r}
+library(MASS)
+select <- dplyr::select
+
+set.seed(123)
+
+full_lm <- lm(INTRATE ~ ., data = set_training)
+stepwise_model <- stepAIC(full_lm, direction = "both", trace = FALSE)
+stepwise_preds <- predict(stepwise_model, newdata = set_test)
+stepwise_rmse <- sqrt(mean((stepwise_preds - set_test$INTRATE)^2))
+```
+
 ### LASSO for MLR
 
 ```{r}
@@ -306,6 +320,12 @@ best_params_elastic_net
 
 Since our goal is to get best result of predicting interest rate, `INTRATE`. Therefore, I will evaluate the models' performance of these 4 models, MLR, Lasso and Ridge. I will use RMSE to evaluate the models' performance.
 
+### Evaluate Stepwise
+
+```{r}
+stepwise_rmse
+```
+
 ### Evaluate Linear Regression
 
 ```{r}
@@ -353,7 +373,7 @@ rmse(actual = set_test %>% pull(INTRATE), pred = pred_elastic_net)
 
 ## Summary of Linear Model
 
-From the output, we can see that the Ridge model has lowest RMSE, which means its predicting is best.
+From the output, we can see that the Stepwise Model has lowest RMSE, which means its predicting is best.
 
 # Tree Model
 
@@ -860,16 +880,43 @@ From the output, I can see that all model is worse than the random forest and bo
 
 # PCA
 
-I will not do PCA since it is unsupervised learning method. PCA's main goal is to preserve most of variance of predictors when we do Dimensional reduction. The unsupervised learning algorithm will not be helpful in predicting `INTRATE`, therefore I will not do it.
+```{r}
+numeric_cols <- set_training[, sapply(set_training, is.numeric)]
+numeric_cols <- numeric_cols[, colnames(numeric_cols) != "INTRATE"]
+scaled_train <- scale(numeric_cols)
+test_numeric <- set_test[, sapply(set_test, is.numeric)]
+test_numeric <- test_numeric[, colnames(test_numeric) != "INTRATE"]
+scaled_test <- scale(test_numeric,
+                     center = attr(scaled_train, "scaled:center"),
+                     scale = attr(scaled_train, "scaled:scale"))
+pca_model <- prcomp(scaled_train, center = FALSE, scale. = FALSE)
+expl_var <- summary(pca_model)$importance["Cumulative Proportion", ]
+n_pcs <- which(expl_var >= 0.9)[1]
+if (is.na(n_pcs)) {
+  n_pcs <- ncol(pca_model$x)
+}
+n_pcs <- min(n_pcs, ncol(pca_model$x))
+cat("Using", n_pcs, "principal components\n")
+pca_train <- as.data.frame(pca_model$x[, 1:n_pcs])
+pca_train$INTRATE <- set_training$INTRATE
+pca_test <- as.data.frame(as.matrix(scaled_test) %*% pca_model$rotation[, 1:n_pcs])
+pca_test$INTRATE <- set_test$INTRATE
+
+pca_lm <- lm(INTRATE ~ ., data = pca_train)
+pca_preds <- predict(pca_lm, newdata = pca_test)
+pca_rmse <- sqrt(mean((pca_preds - set_test$INTRATE)^2))
+
+pca_rmse
+```
+
+From the output, I can see that PCA's RMSE is 1.667192, which is worse than Boosting Tree.
+
 
 # Summary
 
-In this unscaled data, for predicting, the final model is boosting tree.
+In this unscaled data, for predicting, the final model is boosting tree. Then I will try the scaled data to get some better results. For example, the model KNN is very sensitive to scale and variance of predictors, then I will scaled data and run it again.
 
-***
-***
-***
-***
+Also, I will not run all tree model in scale data. The reason in the below.
 
 
 # Scaling data and Run again
@@ -919,6 +966,17 @@ set_test_scaled = scale_method(set_test)
 
 
 ## Linear Regression, lasso, ridge, elastic net, with scaled data
+
+### Stepwise Linear Model
+
+```{r}
+set.seed(123)
+
+full_lm <- lm(INTRATE ~ ., data = set_training_scaled)
+stepwise_model <- stepAIC(full_lm, direction = "both", trace = FALSE)
+stepwise_preds <- predict(stepwise_model, newdata = set_test_scaled)
+stepwise_rmse <- sqrt(mean((stepwise_preds - set_test_scaled$INTRATE)^2))
+```
 
 ### LASSO for MLR
 
@@ -1027,6 +1085,12 @@ best_params_elastic_net_scaled
 
 #### Evaluate Model
 
+### Evaluate Stepwise Model
+
+```{r}
+stepwise_rmse
+```
+
 ### Evaluate Lasso Model
 
 ```{r}
@@ -1060,7 +1124,7 @@ pred_elastic_net_scaled = predict(final_fit_scaled, new_data = set_test_scaled)$
 rmse(actual = set_test_scaled %>% pull(INTRATE), pred = pred_elastic_net_scaled)
 ```
 
-From the output, I can see that the scaled elastic net model is the best, also better than unscaled mlr shrinkage model. But the model is worse than the boosting tree. Therefore, until now, boosting tree is still the best model.
+From the output, I can see that the elastic net model is the best. But all models are worse than Boosting Tree.
 
 
 ## knn Model with scaled data
@@ -1326,8 +1390,11 @@ rmse(actual = set_test_scaled %>% pull(INTRATE), pred_svr_rbf_scaled)
 
 All scaled SVR model is worse than boosting tree.
 
+
 # Summary
 
-Boosting tree is best.
+From all outputs, we can see that the Boosting Tree model is the best. Also, the Boosting tree model has high `mtry`, which means the model is very flexible. From the MLR model, we can see that the model has low $R^2$, which means the model is under-fit. Therefore, a model with higher flexibility will work better for this dataset, and the model Boosting Tree is best.
+
+In boosting tree model, we use GPU to train model (Therefore we must use reticulate to use python, since R's library do not support CUDA). But we have not try the deep learning, we think we may get better results if we try deep learning.
 
 
